@@ -1,4 +1,5 @@
 *.rpa
 *.zip
+*.manifest
 out
 __pycache__

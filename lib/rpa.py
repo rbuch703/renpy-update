@@ -1,7 +1,8 @@
 import base64
-import hashlib
 import zlib
 import pickle
+
+from lib.utils import hash_sha2
 
 class RpaReader:
     """Class to read RPA archive files."""
@@ -40,7 +41,14 @@ class RpaReader:
             yield file_name, contents
 
     def content_map(self):
-        """Static method to create a content map of an RPA file."""
+        """Create a content map of an RPA file that allows to recreate the whole file from individual components.
+
+        Args:
+            `base_offset`: If provided (even if `0`), all content references will contain an offset
+            and size into the source RPA file. Offsets are shifted by `base_offset`, which allows
+            to reference these files directly as indices into an outer container (e.g. a .zip or
+            .tar file).
+        """
 
         content = []
         for _file_name, (offset, size) in self.index.items():
@@ -65,11 +73,17 @@ class RpaReader:
                 assert gap_size < (10 * 1024 * 1024), "Gap too large!"
                 self.file.seek(current_offset)
                 contents = self.file.read(gap_size)
-                res.append(("raw", base64.b64encode(contents).decode('utf-8')))
+                res.append({"raw": base64.b64encode(contents).decode('utf-8')})
                 current_offset += gap_size
             else:
                 assert current_offset == entry_offset, "Overlapping entries in RPA"
-                res.append(("sha2", entry_sha2))
+                entry = {
+                    "sha2": entry_sha2,
+                }
+
+                entry["offset"] = entry_offset
+                entry["size"] = entry_size
+                res.append(entry)
                 current_offset += entry_size
                 current_index += 1
 
@@ -77,47 +91,43 @@ class RpaReader:
         self.file.seek(current_offset)
         remaining = self.file.read()
         if remaining:
-            res.append(("raw", base64.b64encode(remaining).decode('utf-8')))
+            res.append({"raw": base64.b64encode(remaining).decode('utf-8')})
 
         rpa = _try_convert_to_rpa(res)
-
 
         return [ "blob", res ] if rpa is None else ["rpa", rpa ]
 
     def hash_entry(self, offset, size):
         """Compute the SHA-256 hash of the RPA entry at `offset` with size `size`"""
-        sha2 = hashlib.sha256()
         self.file.seek(offset)
-        remaining = size
-        while remaining > 0:
-            chunk_size = min(65536, remaining)
-            chunk = self.file.read(chunk_size)
-            sha2.update(chunk)
-            remaining -= chunk_size
-        sha2 = sha2.hexdigest()
-        return sha2
+        return hash_sha2(self.file, size)
 
 def _try_convert_to_rpa(content):
     RPA_SPACER = b"Made with Ren'Py."
 
     rpa = []
-    for i, part in enumerate(content):
-        kind, data = part
+    for i, entry in enumerate(content):
+        is_raw = "raw" in entry
         if i == 0 or i == len(content) - 1:
-            if kind != "raw":
+            if not is_raw:
                 # For proper RPAs, header and trailer must be raw
                 return None
-            rpa.append(data)
+            rpa.append(entry)
         else:
-            if kind == "raw":
-                if base64.b64decode(data) != RPA_SPACER:
+            if is_raw:
+                if i % 2 == 1:
+                    # A RPA file is a sequence alternating between entries and raw data.
+                    # Two raw data entries in a row are not allowed.
+                    return None
+                if base64.b64decode(entry["raw"]) != RPA_SPACER:
                     # Unrecognized raw data in the middle of the RPA
                     return None
                 else:
                     # Don't serialize RPA spacers, they are implicit in the file format
                     pass
-            elif kind == "sha2":
-                rpa.append(data)
+            elif "sha2" in entry:
+
+                rpa.append(entry)
             else:
                 assert False, "Invalid RPA content entry"
     return rpa
