@@ -25,16 +25,16 @@ class RpaReader:
         else:
             raise ValueError("Unsupported RPA version")
 
-        self.decrypted_index = _read_and_decrypt_index(self.file, index_offset, key)
+        self.index = _read_index(self.file, index_offset, key)
     
     def entries(self):
         """Return the decrypted index entries."""
-        for file_name, (offset, size) in self.decrypted_index.items():
+        for file_name, (offset, size) in self.index.items():
             yield file_name, (offset, size)
 
     def files(self):
         """Generator yielding (file_name, file_contents) tuples."""
-        for file_name, (offset, size) in self.decrypted_index.items():
+        for file_name, (offset, size) in self.index.items():
             self.file.seek(offset)
             contents = self.file.read(size)
             yield file_name, contents
@@ -43,7 +43,7 @@ class RpaReader:
         """Static method to create a content map of an RPA file."""
 
         content = []
-        for _file_name, (offset, size) in self.decrypted_index.items():
+        for _file_name, (offset, size) in self.index.items():
             sha2 = self.hash_entry(offset, size)
             content.append((offset, size, sha2))
 
@@ -68,7 +68,7 @@ class RpaReader:
                 res.append(("raw", base64.b64encode(contents).decode('utf-8')))
                 current_offset += gap_size
             else:
-                assert current_offset == entry_offset
+                assert current_offset == entry_offset, "Overlapping entries in RPA"
                 res.append(("sha2", entry_sha2))
                 current_offset += entry_size
                 current_index += 1
@@ -79,9 +79,13 @@ class RpaReader:
         if remaining:
             res.append(("raw", base64.b64encode(remaining).decode('utf-8')))
 
-        return res
+        rpa = _try_convert_to_rpa(res)
+
+
+        return [ "blob", res ] if rpa is None else ["rpa", rpa ]
 
     def hash_entry(self, offset, size):
+        """Compute the SHA-256 hash of the RPA entry at `offset` with size `size`"""
         sha2 = hashlib.sha256()
         self.file.seek(offset)
         remaining = size
@@ -93,6 +97,32 @@ class RpaReader:
         sha2 = sha2.hexdigest()
         return sha2
 
+def _try_convert_to_rpa(content):
+    RPA_SPACER = b"Made with Ren'Py."
+
+    rpa = []
+    for i, part in enumerate(content):
+        kind, data = part
+        if i == 0 or i == len(content) - 1:
+            if kind != "raw":
+                # For proper RPAs, header and trailer must be raw
+                return None
+            rpa.append(data)
+        else:
+            if kind == "raw":
+                if base64.b64decode(data) != RPA_SPACER:
+                    # Unrecognized raw data in the middle of the RPA
+                    return None
+                else:
+                    # Don't serialize RPA spacers, they are implicit in the file format
+                    pass
+            elif kind == "sha2":
+                rpa.append(data)
+            else:
+                assert False, "Invalid RPA content entry"
+    return rpa
+
+
 def _decode(v, key):
     """XOR decode a 32-bit value with a 4-byte key."""
     v_bytes = v.to_bytes(4, 'big')
@@ -100,7 +130,7 @@ def _decode(v, key):
     return int.from_bytes(decoded, 'big')
 
 
-def _read_and_decrypt_index(file, index_offset, key):
+def _read_index(file, index_offset, key):
     """Read and decrypt the RPA index from the archive.
     
     Args:
