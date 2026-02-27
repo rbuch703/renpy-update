@@ -2,6 +2,7 @@
 
 import base64
 import json
+import os
 import sys
 import zipfile
 
@@ -72,6 +73,36 @@ def generate_manifest(zip_path):
     zf.close()
     return files
 
+def generate_manifests(all_zip_paths):
+    """Validate zip files and return a dict of zip_path -> manifest_data.
+
+    For each path, verifies it is a valid zip file, then loads the corresponding
+    .manifest file from disk if one exists, or generates the manifest in memory
+    by scanning the zip. Duplicate paths are processed only once.
+
+    Args:
+        all_zip_paths: Iterable of zip file paths to process.
+
+    Returns:
+        dict of zip_path -> manifest_data dict.
+
+    Exits with an error if any path is not a valid zip file.
+    """
+    manifests = {}  # zip_path -> manifest_data dict
+    for zip_path in all_zip_paths:
+        if zip_path in manifests:
+            continue
+        if not zipfile.is_zipfile(zip_path):
+            print(f"Error: not a valid zip file: {zip_path}", file=sys.stderr)
+            sys.exit(1)
+        manifest_path = f"{zip_path}.manifest"
+        if os.path.exists(manifest_path):
+            print(f"Loading manifest {manifest_path}")
+            manifests[zip_path] = load_manifest(manifest_path)
+        else:
+            print(f"Generating manifest for {zip_path}")
+            manifests[zip_path] = generate_manifest(zip_path)
+    return manifests
 
 def write_manifest(manifest_data, manifest_path):
     """Write manifest data to a JSON file."""
@@ -83,8 +114,11 @@ def write_manifest(manifest_data, manifest_path):
 # Manifest reading / querying
 # ---------------------------------------------------------------------------
 
-def extract_leaf_hashes(manifest_path):
+def extract_leaf_hashes(manifest_data):
     """Extract all sha2 hashes from leaf files (not intermediate files) in a manifest.
+
+    Args:
+        manifest_data: A manifest dict (filename -> properties).
 
     Leaf files are:
     - Regular (non-RPA) file entries: their top-level sha2 with compressed_size
@@ -100,7 +134,6 @@ def extract_leaf_hashes(manifest_path):
         dict: A mapping of sha2 hex-digest strings to object size for all leaf files.
               Regular files use 'compressed_size', RPA sub-entries use 'size'.
     """
-    manifest_data = load_manifest(manifest_path)
 
     def _add_hash(hashes, sha2, size):
         if sha2 in hashes:
@@ -125,16 +158,19 @@ def extract_leaf_hashes(manifest_path):
     return hashes
 
 
-def extract_leaf_hash_names(manifest_path):
-    """Build a mapping from leaf sha2 hashes to a human-readable name.
+def extract_leaf_hash_names(manifest_data):
+    """Build a mapping from leaf sha2 hashes to a human-readable name and size.
 
-    For regular files, the name is the zip entry path.
-    For RPA sub-entries, the name indicates the containing RPA archive.
+    Args:
+        manifest_data: A manifest dict (filename -> properties).
+
+    For regular files, the name is the zip entry path and size is compressed_size.
+    For RPA sub-entries, the name indicates the containing RPA archive and size
+    is the sub-entry size.
 
     Returns:
-        dict: sha2 -> descriptive name string.
+        dict: sha2 -> (descriptive name string, size in bytes).
     """
-    manifest_data = load_manifest(manifest_path)
 
     names = {}
     for entry_name, props in manifest_data.items():
@@ -143,10 +179,10 @@ def extract_leaf_hash_names(manifest_path):
         if 'rpa' in props:
             for entry in props['rpa']:
                 if 'sha2' in entry:
-                    names.setdefault(entry['sha2'], f"(in RPA {entry_name})")
+                    names.setdefault(entry['sha2'], (f"(in RPA {entry_name})", entry['size']))
         else:
             if 'sha2' in props:
-                names.setdefault(props['sha2'], entry_name)
+                names.setdefault(props['sha2'], (entry_name, props['compressed_size']))
     return names
 
 
