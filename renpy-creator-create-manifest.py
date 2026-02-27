@@ -9,12 +9,8 @@ from lib.rpa import RpaReader
 from lib.utils import COMPRESSION_NAMES, hash_sha2, get_zip_entry_offset
 
 
-def main():
-    if len(sys.argv) != 2:
-        print("Usage: renpy-create-update-package.py <output_package.zip>")
-        sys.exit(1)
-
-    output_package_path = sys.argv[1]
+def process_zip(output_package_path):
+    """Process a single zip file and write its manifest."""
     files = {}
 
     zf = zipfile.ZipFile(output_package_path, 'r')
@@ -50,7 +46,18 @@ def main():
 
             files[info.filename] = entry
 
-    json.dump(files, open(f"{output_package_path}.manifest", "w"), indent=2)
+    manifest_path = f"{output_package_path}.manifest"
+    json.dump(files, open(manifest_path, "w"), indent=2)
+    print(f"  Wrote manifest `{manifest_path}`")
+
+
+def main():
+    if len(sys.argv) < 2:
+        print("Usage: renpy-creator-create-manifest.py <package.zip> [<package2.zip> ...]")
+        sys.exit(1)
+
+    for path in sys.argv[1:]:
+        process_zip(path)
 
 if __name__ == '__main__':
     main()
