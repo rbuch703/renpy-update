@@ -1,120 +1,17 @@
 #!/usr/bin/env python3
 import argparse
-import json
-import sys
 import hashlib
 import os
+import sys
 import zipfile
 
-
-def _load_manifest(manifest_path):
-    """Load and return the parsed JSON data from a manifest file."""
-    with open(manifest_path, 'r', encoding='utf-8') as f:
-        return json.load(f)
-
-
-def extract_leaf_hashes(manifest_path):
-    """Extract all sha2 hashes from leaf files (not intermediate files) in a manifest.
-
-    Leaf files are:
-    - Regular (non-RPA) file entries: their top-level sha2 with compressed_size
-    - RPA sub-entries that have a sha2 (excluding 'raw' entries and the
-      RPA file's own top-level sha2, which is an intermediate/composite hash)
-
-    Skipped entries:
-    - Directories
-    - RPA top-level sha2 (intermediate)
-    - RPA sub-entries with only 'raw' data (no sha2)
-
-    Returns:
-        dict: A mapping of sha2 hex-digest strings to object size for all leaf files.
-              Regular files use 'compressed_size', RPA sub-entries use 'size'.
-    """
-    manifest_data = _load_manifest(manifest_path)
-
-    def _add_hash(hashes, sha2, size):
-        if sha2 in hashes:
-            if hashes[sha2] != size:
-                print(f"Error: hash {sha2} has conflicting sizes: {hashes[sha2]} vs {size}",
-                      file=sys.stderr)
-                sys.exit(1)
-        else:
-            hashes[sha2] = size
-
-    hashes = {}
-    for _name, props in manifest_data.items():
-        if props.get('directory'):
-            continue
-        if 'rpa' in props:
-            # RPA file: collect hashes from sub-entries only (leaf chunks)
-            for entry in props['rpa']:
-                if 'sha2' in entry:
-                    _add_hash(hashes, entry['sha2'], entry['size'])
-        else:
-            # Regular file: the top-level sha2 is the leaf hash
-            if 'sha2' in props:
-                _add_hash(hashes, props['sha2'], props['compressed_size'])
-    return hashes
-
-
-def extract_leaf_hash_names(manifest_path):
-    """Build a mapping from leaf sha2 hashes to a human-readable name.
-
-    For regular files, the name is the zip entry path.
-    For RPA sub-entries, the name indicates the containing RPA archive.
-
-    Returns:
-        dict: sha2 -> descriptive name string.
-    """
-    manifest_data = _load_manifest(manifest_path)
-
-    names = {}
-    for entry_name, props in manifest_data.items():
-        if props.get('directory'):
-            continue
-        if 'rpa' in props:
-            for entry in props['rpa']:
-                if 'sha2' in entry:
-                    names.setdefault(entry['sha2'], f"(in RPA {entry_name})")
-        else:
-            if 'sha2' in props:
-                names.setdefault(props['sha2'], entry_name)
-    return names
-
-
-def extract_blob_from_manifest(manifest_path, target_hash):
-    """Find a hash in a manifest and extract its raw bytes from the corresponding zip.
-
-    For regular files, extracts the decompressed file content from the zip entry.
-    For RPA chunks, opens the decompressed RPA stream and reads the chunk at its offset.
-
-    Returns:
-        bytes if found, None otherwise.
-    """
-    with open(manifest_path, 'r', encoding='utf-8') as f:
-        manifest_data = json.load(f)
-
-    zip_path = manifest_path
-    if zip_path.endswith('.manifest'):
-        zip_path = zip_path[:-len('.manifest')]
-
-    for name, props in manifest_data.items():
-        if props.get('directory'):
-            continue
-        if 'rpa' in props:
-            for entry in props['rpa']:
-                if entry.get('sha2') == target_hash:
-                    # RPA chunk: open the decompressed RPA stream and read at offset
-                    with zipfile.ZipFile(zip_path, 'r') as zf:
-                        with zf.open(name) as rpa_stream:
-                            rpa_stream.seek(entry['offset'])
-                            return rpa_stream.read(entry['size'])
-        else:
-            if props.get('sha2') == target_hash:
-                # Regular file: extract decompressed content from zip
-                with zipfile.ZipFile(zip_path, 'r') as zf:
-                    return zf.read(name)
-    return None
+from lib.manifest import (
+    load_manifest,
+    extract_leaf_hashes,
+    extract_leaf_hash_names,
+    extract_blob_from_manifest,
+    manifest_zip_path,
+)
 
 
 def dump_largest_blob(label, hashes, manifest_paths):
@@ -293,7 +190,7 @@ def main():
         for manifest_path in dest_manifest_paths:
             if not remaining:
                 break
-            manifest_data = _load_manifest(manifest_path)
+            manifest_data = load_manifest(manifest_path)
             for entry_name, props in manifest_data.items():
                 if not remaining:
                     break
@@ -333,7 +230,7 @@ def main():
                 by_manifest.setdefault(mpath, []).append((sha2, zname))
 
             for mpath, entries in by_manifest.items():
-                zip_path = mpath[:-len('.manifest')] if mpath.endswith('.manifest') else mpath
+                zip_path = manifest_zip_path(mpath)
                 with zipfile.ZipFile(zip_path, 'r') as zf:
                     for sha2, zname in entries:
                         data = zf.read(zname)
@@ -344,7 +241,7 @@ def main():
 
             # 2b. RPA files — one pass per RPA
             for (mpath, rpa_name), plan in rpa_plan.items():
-                zip_path = mpath[:-len('.manifest')] if mpath.endswith('.manifest') else mpath
+                zip_path = manifest_zip_path(mpath)
                 blobs = plan["blobs"]
                 compression = plan["meta"]["compression"]
                 zip_data_offset = plan["meta"]["zip_data_offset"]
