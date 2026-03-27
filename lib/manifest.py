@@ -60,6 +60,10 @@ def generate_manifest(zip_path):
                 "compressed_size": info.compress_size,
             }
 
+            # Record zip external attributes (includes Unix permissions)
+            if info.external_attr:
+                entry["external_attr"] = info.external_attr
+
             if info.filename.endswith('.rpa'):
                 print(f"  Parsing RPA file `{info.filename}`")
                 reader = RpaReader(zf.open(info))
@@ -295,6 +299,12 @@ def verify_manifest(manifest_path):
             if actual_sha2 != expected_sha2:
                 errors.append(f"{name}: sha2 mismatch: zip={actual_sha2}, manifest={expected_sha2}")
 
+        # --- External attributes ---
+        expected_attr = props.get('external_attr')
+        if expected_attr is not None and info.external_attr != expected_attr:
+            errors.append(f"{name}: external_attr mismatch: "
+                          f"zip={info.external_attr:#x}, manifest={expected_attr:#x}")
+
         # --- RPA sub-entries ---
         rpa_entries = props.get('rpa') or props.get('blob')
         if rpa_entries is not None:
@@ -309,7 +319,7 @@ def _verify_rpa_entries(zf, zip_entry_name, rpa_entries, errors):
     """Verify RPA/blob sub-entries against the decompressed RPA stream."""
     try:
         rpa_stream = zf.open(zip_entry_name)
-    except Exception as e:
+    except Exception as e: # pylint: disable=broad-except
         errors.append(f"{zip_entry_name}: cannot open for RPA verification: {e}")
         return
 

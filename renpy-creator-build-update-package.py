@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import hashlib
+import json
 import os
 import sys
 import zipfile
@@ -70,7 +71,7 @@ def main():
             if actual != sha2:
                 print(f"Error: hash mismatch: expected {sha2}, got {actual}", file=sys.stderr)
                 sys.exit(1)
-            zout.writestr(sha2, data)
+            zout.writestr(f"blobs/{sha2}", data)
             written += 1
             if written % 1000 == 0:
                 print(f"  {written}/{total} entries written")
@@ -79,10 +80,22 @@ def main():
         for (zpath, rpa_name), plan in rpa_plan.items():
             extract_rpa_blobs(on_blob_retrieved, zpath, rpa_name,
                 plan["blobs"], plan["meta"]["compression"], plan["meta"]["zip_data_offset"])
+
+        # Write dest manifests into the update zip.
+        for zip_path in dest_zip_paths:
+            name = os.path.basename(f"{zip_path}.manifest")
+            zout.writestr(f"manifests/{name}", json.dumps(manifests[zip_path], indent=2))
+
+        # Write empty marker files for each source manifest under sources/ . Those are used for
+        # informal messages in the tool that applies the update package.
+        for zip_path in source_zip_paths:
+            name = os.path.basename(f"{zip_path}.manifest")
+            zout.writestr(f"sources/{name}", "")
     print(f"  {written}/{total} entries written")
 
-    final_size = os.path.getsize(update_zip_path)
-    print(f"Wrote {update_zip_path} ({final_size} bytes)")
+
+    #final_size = os.path.getsize(update_zip_path)
+    #print(f"Wrote {update_zip_path} ({final_size} bytes)")
 
 def extract_regular_blobs(on_blob_retrieved, regular_plan):
     """Extract blobs from regular (non-RPA) zip entries and emit them via callback.
